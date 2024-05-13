@@ -195,9 +195,49 @@ protected $routeMiddleware = [
 
 Then, apply the middleware to your webhook route.
 
+```
+Route::post('/stripe/webhook', 'StripeWebhookController@handleWebhook')->middleware('webhook');
+```
+
+
 ## Step 11: Implement Subscription Button in Frontend
 
 Implement a subscription button in your frontend to allow users to subscribe. This could be a simple HTML form or a JavaScript-powered button.
+
+```
+<form action="/subscribe" method="POST">
+    @csrf
+    <button type="submit">Subscribe</button>
+</form>
+```
+And here's an example of a JavaScript-powered button for subscription:
+
+```
+<button id="subscribeButton">Subscribe</button>
+
+<script>
+    document.getElementById('subscribeButton').addEventListener('click', function() {
+        fetch('/subscribe', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
+            },
+            body: JSON.stringify({})
+        }).then(function(response) {
+            // Handle response
+            console.log(response);
+        }).catch(function(error) {
+            // Handle error
+            console.error(error);
+        });
+    });
+</script>
+
+```
+
+
+These examples demonstrate how you can implement a subscription button in your frontend using either a simple HTML form or a JavaScript-powered button. Adjust the action URL and form fields as necessary based on your application's routes and requirements.
 
 ## Step 12: Test Subscription Flow
 

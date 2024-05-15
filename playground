@@ -1,0 +1,179 @@
+<?php
+
+namespace App\Http\Controllers\Api\Donations;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Stripe\Exception\ApiErrorException;
+use App\Http\Requests\SubscriptionRequest;
+use App\Models\User;
+use App\Models\Transaction;
+use Illuminate\Support\Facades\Hash;
+
+class SubscriptionController extends Controller
+{
+
+    public $request;
+    public $data;
+
+    public function store(SubscriptionRequest $request)
+    {
+
+        $this->request = $request;
+        $this->data = $request->all();
+
+        try {
+            $stripe = \Stripe\Stripe::setApiKey(config('services.stripe.secret'));
+            \Stripe\Stripe::setApiVersion('2020-08-27');
+
+            $amount = (int) $this->data['amount'];
+
+            // step 1, set up intent to pay
+            if (isset($this->request['payment_method_id']) && ! empty($this->request['payment_method_id'])) {
+                $paymentIntentData = [
+                    'payment_method' => $this->request['payment_method_id'],
+                    'amount' => $amount,
+                    'currency' => 'gbp',
+                    'payment_method_types' => ['card'],
+                ];
+
+                // create stripe customer id
+                $stripeCustomer = \Stripe\Customer::create([
+                    'email' => $this->request['email'],
+                    'name' => $this->request['name'],
+                    'payment_method' => $this->request['payment_method_id']
+                ]);
+
+                $paymentIntentData['customer'] = $stripeCustomer->id;
+
+                $intent = \Stripe\PaymentIntent::create($paymentIntentData);
+            }
+
+            // step 2, if user gets 3d secure and passes, we retrieve
+            if (isset($this->request['payment_intent_id']) && ! empty($this->request['payment_intent_id'])) {
+                $intent = \Stripe\PaymentIntent::retrieve(
+                    $this->request['payment_intent_id'] ?? null
+                );
+                $cardDetails = $intent->charges->data[0]->payment_method_details->card;
+                if ($intent->status !== 'succeeded') {
+                    $intent->confirm();
+                }
+            }
+
+             // step 3, all parties are happy now move on
+             if (isset($this->request['payment_confirmed']) && $this->request['payment_confirmed'] == true) {
+                $intent = new \stdClass();
+                $intent->id = $this->request['payment_intent_id'];
+                $intent->status = 'succeeded';
+
+                return $this->performPaymentRecord();
+            }
+            return $this->generatePaymentResponse($intent);
+
+        } catch (ApiErrorException $e) {
+            throw new \Exception($e->getMessage());
+        } catch (\Exception $e) {
+            throw new \Exception($e->getMessage());
+        }
+    }
+
+    public function generatePaymentResponse($intent)
+    {
+        if (isset($intent->status) && $intent->status == 'requires_action' && $intent->next_action->type == 'use_stripe_sdk') {
+            return response()->json([
+                'success' => true,
+                'message' => '3D Secure required',
+                'requires_action' => true,
+                'intent' => $intent,
+                'payment_intent_client_secret' => $intent->client_secret ?? null,
+            ], 200);
+        } elseif ($intent->status == 'requires_confirmation') {
+            return response()->json([
+                'success' => true,
+                'message' => '3D Secure required',
+                'intent' => $intent,
+                'confirm_card_payment' => true,
+                'payment_intent_client_secret' => $intent->client_secret ?? null,
+            ], 200);
+        } elseif (isset($intent->status) && $intent->status == 'succeeded') {
+
+            return $this->performPaymentRecord();
+        } else {
+            // Invalid status
+            throw new \Exception('Invalid PaymentIntent status');
+        }
+    }
+
+
+    public function performPaymentRecord()
+    {
+        $intent = null;
+        if (!empty($this->request['payment_intent_id'])) {
+            $intent = \Stripe\PaymentIntent::retrieve($this->request['payment_intent_id']);
+        }
+        $user = $this->createUser($intent);
+        $transaction = $this->createTransaction($intent, $user->id);
+
+        return response()->json([
+            'success' => true,
+            'data' => 'success',
+            'message' => 'Your subscription has been set up successfully.',
+        ], 200);
+    }
+
+
+    public function createUser($intent) {
+        try {
+            $cardDetails = null;
+
+            if ($intent && !empty($intent->charges->data)) {
+                $cardDetails = $intent->charges->data[0]->payment_method_details->card;
+            }
+
+            $userData = [
+                'email' => $this->request['email'],
+                'name' => $this->request['name'],
+                'password' => Hash::make($this->request['name']),
+                'card_last4' => $cardDetails->last4 ?? null,
+                'card_brand' => $cardDetails->brand ?? null,
+                'stripe_customer_id' => $intent->customer ?? null,
+                'subscription_amount' => $this->request['amount'],
+                'subscription_start_date' => now(),
+                'active' => true,
+                'gift_aid' => $this->request['gift_aid'] ?? false,
+                'data' => json_encode([
+                    'phone' => $this->request['phone'] ?? '',
+                    'address' => $this->request['address'] ?? '',
+                    'contact_preferences' => $this->request['contact_preferences'] ?? '',
+                ]),
+            ];
+
+            $user = User::create($userData);
+            return $user;
+
+        } catch (\Exception $e) {
+            Log::error("Failed to create user: {$e->getMessage()}");
+            return null;
+        }
+    }
+
+    public function createTransaction($intent, $userId) {
+        try {
+            $transactionData = [
+                'user_id' => $userId,
+                'payment_date' => now(),
+                'stripe_ref' => $intent->id ?? null,
+                'amount' => $this->request['amount'],
+                'success' => true
+            ];
+
+            $transaction = Transaction::create($transactionData);
+            return $transaction;
+
+        } catch (\Exception $e) {
+            Log::error("Failed to create transaction: {$e->getMessage()}");
+            return null;
+        }
+    }
+}
